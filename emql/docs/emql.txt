@@ -1,0 +1,813 @@
+======================================
+api/service/mqlread with extended=true
+======================================
+
+The ``api/service/mqlread`` with ``extended=true`` API implements the Extended
+MQL service.
+
+Extended MQL augments MQL by allowing properties to call out to external
+data sources or to run arbitrary code to dynamically compute results for a
+MQL query.
+
+See the `gallery`_ of documented extension properties for examples.
+
+To invoke extended MQL, use the new ``"extended"`` ``api/service/mqlread``
+envelope parameter and set it to ``true``.
+
+
+Table of Contents
+-----------------
+
+1. Definitions_
+2. Creating_ an extension property
+3. Implementing an adapter_
+4. The adapter contract_
+
+   - the pre_ phase
+   - the fetch_ phase
+   - the reduce_ phase
+   - the help_ phase
+
+5. Cursoring_ and crawling for results
+6. Passing_ data between adapter phases
+7. Sorting_ and counting_ results
+8. Invoking the extended MQL service_
+9. Error_ reporting and debugging
+10. Taking control_ of adapter invocation
+
+
+.. _definitions:
+
+1. Definitions
+--------------
+
+*extension property*
+  an extension property is an instance of both ``/type/property`` and
+  ``/type/extension`` that binds a key to an adapter program to invoke when
+  the property is used in an extended MQL query.
+
+*adapter*
+  An adapter is a program that implements the extension property invocation
+  contract_. An adapter program is referred to by its extension property via
+  the ``/type/extension/uri`` property. Currently, two URL schemes are
+  supported, ``http`` and ``python``. An HTTP adapter is invoked by the
+  extended MQL driver process via a simple HTTP connection using the
+  ``POST`` method. A python adapter is run by the extended MQL driver
+  process dynamically importing the module and class denoted by the
+  adapter's URI. 
+
+
+.. _creating:
+
+2. Creating an extension property
+---------------------------------
+
+Extension properties may be defined in one of two namespaces: either on a
+type, like regular MQL properties, or in the ``/freebase/emql`` namespace
+which defines a global namespace specific to extended MQL.
+
+Extension properties defined on a type are addressed using the same syntax
+as regular MQL properties whereas global extended MQL properties - defined
+within the ``/freebase/emql`` namespace - are addressed by prefixing them
+with the '@' character.
+
+Use the `query editor`_ to edit and run one of the MQL queries below.
+
+Query to create an extension property on a type::
+
+    {
+      "create": "unless_exists",
+      "name": <name of property>
+      "id": null,
+      "/type/property/schema": {
+        "id": <id of type to host property>
+      },
+      "key": {
+        "value": <name of property>,
+        "namespace": <id of type to host property>
+      },
+      "/type/extension/uri": {
+        "value": <uri of adapter to invoke>
+      },
+      "/type/extension/pre": {
+        "value": true
+      },
+      "/type/extension/fetch": {
+        "value": true
+      },
+      "/type/extension/reduce": {
+        "value": false
+      },
+      "/type/extension/help": {
+        "value": false
+      },
+      "type": [
+        "/type/property",
+        "/type/extension"
+      ],
+      "/type/extension/api_key_names": [ 
+        "zero", "or", "more", "api", "key", "names", ...
+      ],
+    }
+
+The values for ``/type/extension/pre``,
+``/type/extension/fetch``, ``/type/extension/reduce`` and
+``/type/extension/help`` are set to their default values and can be
+changed to suit the property's needs with a one of the queries below.
+
+Update a phase property on an extension property::
+
+  {
+    "type": "/type/extension",
+    "id": <id of property to update>,
+    "/type/extension/<phase>": {
+      "value": <true or false>,
+      "connect": "update"
+    }
+  }
+
+
+.. _adapter:
+
+3. Implementing an adapter
+--------------------------
+
+While Metaweb's Acre_ service is ideally suited for implementing an HTTP
+adapter in javascript, any server answering HTTP requests over the ``POST``
+method can be used as an implementation host for an extension property
+adapter. The ``uri`` to use for an HTTP adapter is its URL. For example, the
+``/people/person/age`` property is currently implemented by the Acre program
+at `http://emql.ovalmeta.user.dev.freebaseapps.com/age <http://acre.freebase.com/#app=/user/ovalmeta/emql&file=age>`_.
+
+Python adapters are run by the extended MQL service process and are therefore
+restricted to controlled implementations.
+
+An adapter's role is to fulfill the extended MQL query for the property (or
+properties) it supports. It communicates with the extended MQL driver by
+implementing the adapter contract_. The adapter defines the semantics of the
+extension property; extended MQL itself knows nothing about the property
+except for its name, defining namespace, its adapter URI and which phases to
+invoke on it.
+
+
+.. _contract:
+
+4. The adapter contract
+-----------------------
+
+An extension property adapter is invoked during the different phases
+necessary to fulfill an extended MQL query. With all phases, JSON is used to
+format parameters. The same is true for return values except for the
+``help`` phase which is expected to set the ``Content-Type`` response header
+and return help text.
+
+Depending on the nature of the operations performed by the adapter, there
+are up to four phases an adapter needs to implement: ``pre``, ``fetch``,
+``reduce`` and ``help``. By default, implementations for the pre_ and fetch_
+phase are expected while providing an implementation for the reduce_ phase is
+optional. Providing an implementation for the help_ phase is strongly
+recommended and ensures the visibility of the property in the extension
+property `gallery`_.
+
+The phases an adapter implements are listed by the schema for the extension
+property via the ``/type/extension/pre``, ``/type/extension/fetch``,
+``/type/extension/reduce`` and ``/type/extension/help`` properties. They can
+be set when creating_ the property and may be changed later.
+
+An adapter is called once per phase per occurrence of the property it
+implements in an extended MQL query. An adapter program may implement
+support for more than one extension property.
+
+
+.. _pre:
+
+a. The ``pre`` phase
+~~~~~~~~~~~~~~~~~~~~
+
+The purpose of this phase is to transform the extended MQL query into a
+valid MQL query suitable for the ``mqlread`` service. Each extension
+property occurrence is replaced by the return value of the ``pre`` call on
+its adapter.
+
+The adapter is invoked with the following parameters:
+
+*call*
+  This parameter contains the name of the phase, ``pre``.
+
+*parent*
+  The extended MQL query containing the extension property being
+  processed. This parameter makes it possible for the adapter to pick
+  through the surrounding query for extra constraints it might use to make
+  its implementation more effective. For example, ``type`` or ``limit``
+  information may be used to restrict the external query it is going to be
+  making.
+
+*params*
+  A dictionary containing the following elements:
+
+  *property*
+    The extension property being processed as it occurs in the original
+    extended MQL query.
+
+  *query* 
+    The right handside of the property as it occurred in the original
+    extended MQL query. It can be any valid JSON, such as ``null``, a
+    string, a number, a dictionary or a list.
+
+  *constraints*
+     An optional list of additional constraints that come from similar
+     suffixed extension property references at the same level in the
+     containing query.
+
+  *:extras*
+     Out of band data to pass onto the next phase invoked on the adapter.
+     See "Passing_ data between adapter phases" for more details.
+
+  For example, in the query::
+
+    [{
+       "name": null,
+       "type": "/people/person",
+       "limit": 3, 
+       "age": null,
+       "age>: 20
+    }]
+
+  the age_ adapter would be invoked with the following ``params``
+  parameter::
+
+     { 
+         "property": "age",
+         "query": null,
+         "constraints": [[">", 20]]
+     }
+
+  It is up to the adapter's implementation to make sense, enforce,
+  implement, ignore or reject constraints.
+
+*api_keys*
+  If the adapter invokes one or more external APIs that require API keys
+  and if the extension property it implements declares API key names via
+  its ``api_key_names`` property then this parameter is a dictionary
+  containing the API keys corresponding to these names provided they were
+  passed in via the ``api_keys`` ``mqlread`` envelope parameter.
+
+
+During the ``pre`` phase, the adapter's role is to inspect the ``parent`` and
+``params`` parameters to possibly gather some context information about the
+query. It is expected to return a JSON dictionary that contains any number of
+clauses to insert into the MQL query in place of the extension property
+occurrence being processed. This dictionary may be empty. For example, the
+age_ property adapter returns::
+
+  {
+    "/people/person/date_of_birth": null,
+    "/people/deceased_person/date_of_death": null
+  }
+
+The results for these extra clauses are going to be passed to the adapter
+during the ``fetch`` phase.
+
+If a property's adapter doesn't require a ``pre`` phase invocation, the
+property's ``/type/extension/pre`` property must be set to ``false``.
+
+
+.. _fetch:
+
+b. The ``fetch`` phase
+~~~~~~~~~~~~~~~~~~~~~~
+
+After all extended MQL properties are replaced by ``pre`` result clauses,
+the resulting query is expected to be valid MQL. The extended MQL driver is
+ready to invoke ``mqlread`` with it.
+
+Once the MQL query is run, the results from the ``pre`` phase insertions are
+sent to the corresponding extension property adapters for the ``fetch`` phase.
+
+During this phase the adapter is responsible for producing and returning the
+results it wants inserted in place of the right handside of the original
+extended MQL property occurrence in the query.
+
+The shape of the results must match that of the query. For example, if the
+right handside of a MQL extension was ``null`` then the result can only be a
+literal - a string, a number, ``true``, ``false`` or ``null``. If it was a
+dictionary, then the result can only be a dictionary. If it was an empty
+array, the result can only be an array of literals. If it was an array of
+one dictionary, the result can only be an array of dictionaries.
+
+The adapter is invoked with the following parameters:
+
+*call*
+  This parameter contains the name of the phase, ``fetch``.
+
+*args*
+  This is an array of all the MQL results returned for the insertions made
+  during the ``pre`` phase for that property occurrence. Whether ``pre``
+  returned any insertions or not, the ``guid`` of the object having matched
+  the containing MQL query is always included under the ``guid`` key.
+
+*params*
+  This is the same as during the pre_ phase.
+
+*api_keys*
+  This is the same as during the pre_ phase.
+
+During the ``fetch`` phase, the adapter's role is to iterate the MQL results
+passed via ``args`` and insert a value into the results for each ``guid`` it
+contains. That value can be a simple string, a number or a more complex JSON
+construct. For example, the age_ property adapter returns the following for
+the three results it might have been invoked with::
+
+  {
+    "#9202a8c04000641f8000000000c015ba": 61,
+    "#9202a8c04000641f80000000008057ef": 45,
+    "#9202a8c04000641f80000000000765f3": 84
+  }
+
+The results returned by each property adapter are then inserted in place of
+the right handside of the original property occurrence in the query's
+results. If the adapter returned no result for a given match then the match is
+removed from the overall query's results unless it was optional.
+
+For example, the age_ property adapter doesn't return an age value for
+people lacking the data to compute it from.
+
+If a property's adapter doesn't require a ``fetch`` phase invocation, the
+property's ``/type/extension/fetch`` property must be set to
+``false``.
+
+
+.. _reduce:
+
+c. The ``reduce`` phase
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``reduce`` phase makes it possible to implement an adapter that returns
+a value for a given list of query results.
+
+This phase is run *after* the ``sort`` and ``limit`` clauses present in
+the query are effected and thus operates on the final results of the query.
+
+Properties with a ``reduce`` phase may occur inside a ``return`` clause causing
+the computed value to replace the list of matches it was computed from.
+Otherwise, the computed value is inserted into each match.
+
+The adapter is invoked with the following parameters:
+
+*call*
+  This parameter contains the name of the phase, ``reduce``.
+
+*args*
+  This is an array of all the extended MQL results returned for the subquery
+  containing the property being processed.
+
+*params*
+  This is the same as during the pre_ and fetch_ phases.
+
+*api_keys*
+  This is the same as during the pre_ and fetch_ phases.
+
+The adapter must return a dictionary containing one value keyed on
+``value``. See chart_ adapter for an example.
+
+For example, the ``/type/object/median`` property can be applied to a list
+of numeric results to return its median value::
+
+    [{
+       "name": null,
+       "type": "/people/person",
+       "limit": 3, 
+       "age": null,
+       "age>: 20,
+       "median": {"value": "age"}
+    }]
+
+A shorthand syntax makes it possible to compute several such medians in the
+same subquery by specifying the ``value`` to compute it on as a suffix to
+the ``median`` property::
+
+    [{
+       "name": null,
+       "type": "/people/person",
+       "limit": 3, 
+       "age": null,
+       "age>: 20,
+       "median:age": null
+    }]
+
+As with MQL's ``count`` property, extension properties implemented with a
+``reduce`` phase can be used in a ``return`` clause.
+
+The result of an extended MQL ``return`` clause is the dictionary of all the
+values thus computed. For example::
+
+    [{
+       "name": null,
+       "type": "/people/person",
+       "limit": 3, 
+       "age": null,
+       "age>": 20,
+       "return": { 
+         "median:age": null,
+         "min:age": null
+         "plot:age": {"label": "name"}
+       }
+    }]
+
+produces this::
+
+  [{
+    "median:age": 51,
+    "min:age": 42,
+    "plot:age": "http://chart.apis.google.com/chart?cht=p&chd=t:51%2C55%2C42&chs=250x100&chl=Jack%20Abramoff%7CBob%20Ney%7CDavid%20Safavian"
+  }]
+
+If a property's adapter requires a ``reduce`` phase invocation, the
+property's ``/type/extension/reduce`` property must be set to
+``true``.
+
+
+.. _help:
+
+d. The ``help`` phase
+~~~~~~~~~~~~~~~~~~~~~
+
+The role of this phase is to return documentation about the property and the
+parameters understood by the adapter implementing it. When help is requested
+on a property via the extended MQL service the adapter's ``help`` phase is
+invoked.
+
+For example, the URL below returns documentation for the `age`_ property:
+`mqlread?help=/people/person/age <mqlread?help=/people/person/age>`_
+
+The adapter is invoked with the following parameters:
+
+*call*
+  This parameter contains the name of the phase, ``help``.
+
+*params*
+  A dictionary containing the following elements:
+
+  *property*
+    The extension property whose documentation is requested.
+
+Instead of returning a JSON string as is the case with the other phases,
+during the ``help`` phase, the adapter is expected to set the
+HTTP ``Content-Type`` response header and write the help text directly into
+the response. If the content type is ``text/x-rst``, then the extended MQL
+service will transform the `reStructuredText`_ into HTML via `docutils`_
+before serving it to the requestor.
+
+If a property's adapter does not implement a ``help`` phase, the
+property's ``/type/extension/help`` property must be set to
+``false``. Properties whose adapter does not implement a ``help`` phase
+are not displayed in the extension property `gallery`_.
+
+
+.. _cursoring:
+
+5. Cursoring and crawling for results
+-------------------------------------
+
+extension property matches follow the same semantics as regular MQL
+properties. Non optional MQL matches that are missing extended MQL matches
+are eliminated. For example, without cursoring, the query shown below to
+find some centenarians would not return any results since the first five
+``/people/person`` matches returned by MQL are very unlikely to be
+centenarians::
+
+  [{
+    "type": "/people/person",
+    "limit": 5,
+    "name": null,
+    "age": null,
+    "age>=": 100
+  }]
+
+The extended MQL service automates cursoring at the top level of the query
+by going back to MQL for more ``/people/person`` matches and re-running the
+fetch_ phase until it has found enough centenarians to satisfy the query or
+MQL returned no more results. By default, it does so in ``limit`` sized
+chunks but this can be rather inefficient if the matches looked for are only
+rare occurrences in the MQL results. The following query is much faster
+since it operates on 500-people chunks at a time::
+
+  [{
+     "type": "/people/person",
+     "limit": 5,
+     "name": null,
+     "age": null,
+     "age>=": 100,
+     "cursor": 500
+  }]
+
+At the subquery level though, cursoring is not enabled by default. For
+example, finding centenarians born in Amsterdam returns no results unless
+cursoring is explicitely requested at the subquery level::
+
+  {
+    "type": "/location/citytown",
+    "!/people/person/place_of_birth": [{
+       "limit": 5,
+       "id": null,
+       "name": null,
+       "age>=": 100,
+       "age": null,
+       "cursor": 500
+    }],
+    "limit": 1,
+    "name": "Amsterdam"
+  }
+
+Such recursive cursoring or crawling can return subtly different results
+depending on how much cursoring is requested. For example, in addition to
+cursoring over cities where people are born, the query below will also crawl
+each city match by re-running the centenarian subquery separately with a MQL
+cursor until all ``/people/person`` matches born in that city are exhausted
+or enough centenarians are found::
+
+  [{
+     "type": "/location/citytown",
+     "!/people/person/place_of_birth": [{
+        "limit": 5,
+        "id": null,
+        "name": null,
+        "age>=": 100,
+        "age": null,
+        "cursor": 500
+     }],
+     "limit": 5,
+     "name": null,
+     "cursor": 20
+  }]
+
+Whereas this query will only return cities where centenarians where found in
+the first five MQL matches::
+
+  [{
+     "type": "/location/citytown",
+     "!/people/person/place_of_birth": [{
+        "limit": 5,
+        "id": null,
+        "name": null,
+        "age>=": 100,
+        "age": null
+     }],
+     "limit": 5,
+     "name": null,
+     "cursor": 20
+  }]
+
+When requesting subquery cursoring, be sure to fully qualify the properties
+that introduce the subqueries as they will be inverted when the subqueries are
+run alone for each containing match.
+
+The ``cursor`` directive supports more advanced options that can be
+specified with a dictionary. For example, to find cities where at least two
+centenarians were born, the following query can be used::
+
+  [{
+      "type": "/location/citytown",
+      "!/people/person/place_of_birth": [{
+         "limit": 5,
+         "id": null,
+         "name": null,
+         "age>=": 100,
+         "age": null,
+         "cursor": {"pagesize": 500, "at-least": 2}
+      }],
+      "limit": 5,
+      "name": null,
+      "cursor": 20
+  }]
+
+When cursoring is explicitely requested at the top level of the query, the
+final top level cursor value is returned in the result envelope. This cursor
+string can then be reused by passing it as a cursor string or a value under
+the ``cursor`` key in the cursor dictionary. If the cursor ``pagesize`` was
+different from the query ``limit`` when the cursor was first created, the
+same pagesize must be reused. For example, the query below returns the next
+ten people for between the ages of 35 and 45 using the specified cursor with
+a pagesize of 100::
+
+  [{         
+     "type": "/people/person",
+     "name": null,
+     "age": null,
+     "age>=": 35,
+     "age<=": 45,
+     "limit": 10,
+     "cursor": {
+       "cursor": "eNpVjEsKwkAQBa-jSMjrT7pnGhHvEbIYxggBMTJBzy8oLqxdUVD12ba1hbnMMa5BwDTeQzQlTQyZlq0Euo8Pajlux273Wh5BDieI_JIj2iEzuKQKBWBK14Q_andSM9n3RJLdmb8Xz-jPTjYQe2a9zCgDW9Y3DGElFg==",
+       "pagesize": 100
+     },
+     "sort": "age"
+  }]
+
+Please note that if not all MQL matches are extended MQL matches, as is the
+case in the example above, it is likely that some matches will be skipped
+when the cursor is reused. The cursor uses a period of ``pagesize`` and is
+implicitely reused by the extended MQL engine until ``limit`` results are
+found, the crawling limit was reached or the matches are exhausted. If more
+than ``limit`` results were found after a given cycle, the extra matches are
+simply discarded. This undesirable behaviour can be controlled by turning
+off implicit cursor reuse - crawling - and by using the same cursor
+``pagesize`` and query ``limit``::
+
+  [{         
+     "type": "/people/person",
+     "name": null,
+     "age": null,
+     "age>=": 35,
+     "age<=": 45,
+     "limit": 10,
+     "cursor": {
+       "pagesize": 10, 
+       "crawl": false,
+       "cursor": "eNpVjEsKwkAQBa-jyJDXn_l0I-I9QhbDSCAgRibE8wuKC2tXFFTb-7Z2jzc2H1cnTOPDRUvRIrBp2aojfDxqMr-fw-G1PJ0yMkHklzK8n4zBtTQogKQ0F_zRwkVTkuMgTJYY30nMOlwzJSHOxpHqXEhZ7A3JoCSB"
+     },
+     "sort": "age"
+  }]
+
+The default crawling limit is 100 iterations per cursor and can be changed
+by setting a cursor's ``crawl`` option to the desired limit.
+
+
+.. _passing:
+
+6. Passing data between adapter phases
+--------------------------------------
+
+It can sometimes be useful to pass data collected during one phase onto the
+next. As mentioned earlier, the ``pre`` and ``fetch`` phases are expected to
+return JSON dictionaries. By default, the ``pre`` phase's results are
+inserted into the MQL query that is run before the ``fetch`` phase and the
+``fetch`` phase's results are inserted into that query's results. A special
+key, called ``:extras`` is handled differently: its value, which can be any
+valid JSON, is stored internally and is passed onto the next phase via the
+``params`` parameter under the ``:extras`` key.
+
+For example, the adapter for `search`_ uses ``:extras`` to store the
+relevance score of search matches obtained during ``pre`` into results
+during ``fetch``.
+
+
+7. Sorting and counting results
+-------------------------------
+
+
+.. _sorting:
+
+a. Sorting results
+~~~~~~~~~~~~~~~~~~
+
+Sorting directives that involve only regular MQL properties are passed
+through to the ``mqlread`` service for the usual processing. 
+
+On the other hand, sorting on extension property results is done after
+running the `fetch`_ phase before running the ``limit`` clause and the
+`reduce`_ phase.
+
+In other words, sorting extended MQL results does not sort Freebase. For
+example, by sorting on ``age`` one only sorts the current extended MQL
+results and won't easily retrieve the oldest or youngest ``/people/person``
+instance in Freebase.
+
+
+.. _counting:
+
+b. Counting results
+~~~~~~~~~~~~~~~~~~~
+
+The ``count`` MQL clause is only supported if the results being counted are
+only MQL results. Counting the results of a subquery that contains extended
+MQL property matches with ``count`` is not supported at this time.
+
+To count results in an extended MQL query or subquery use the ``result-count``
+clause. For example, the query below returns the number of distinct cuisines
+for all the restaurants found in San Francisco::
+
+  [{
+      "!/dining/restaurant/cuisine": [{
+         "type": "/dining/restaurant",
+         "/location/location/in": {
+           "location": "/en/san_francisco",
+           "limit": 0
+         }
+      }],
+      "id": null,
+      "return": "result-count"
+  }]
+
+
+.. _service:
+
+8. Invoking the extended MQL service
+------------------------------------
+
+To submit an extended MQL query you invoke the ``api/service/mqlread``
+service adding ``extended=true`` to the envelope.
+
+
+.. _error:
+
+9. Error reporting and debugging
+--------------------------------
+
+The extended MQL service attempts to report all the error information it
+gets from the services it invokes. For adapters implemented with Acre_ it
+helps to pass ``debug=1`` when invoking the extended MQL service_. 
+
+To see intermediate results between phases, the ``debug`` parameter can also
+be used with one of ``pre`` or ``fetch`` to stop after that phase was run
+and return the intermediate results.
+
+
+.. _control:
+
+10. Taking control of adapter invocation
+----------------------------------------
+
+eMQL control parameters can be specified in the envelope parameter to be 
+global to the query or in the right handside of a MQL extension query to
+control aspects of adapter invocation such as HTTP cache-control or
+debugging.
+
+The following parameters are supported:
+
+*cache*
+  This parameter may be ``true``, ``false`` or a header string.
+  If ``false``, a ``"cache-control: no-cache"`` header is sent along an HTTP
+  adapter call. If ``true``, nothing is sent.
+  As a string, it is sent with a ``cache-control`` header.
+
+*debug*
+  This parameter may be ``true``, ``false`` or a phase name.
+  See Error_ reporting and debugging for more information.
+
+*timeout*
+  This parameter is a decimal timeout value expressed in seconds to be used
+  with HTTP connections and is 60.0s by default.
+
+*deadline*
+  This parameter is a timestamp expressed in decimal seconds to be used
+  as the deadline by which the query must be completed or timed out.
+  When both ``deadline`` and ``timeout`` are used, ``deadline`` caps
+  ``timeout``.
+
+*url*
+  This parameter is a URL to supercede an HTTP adapter's ``uri`` extension
+  property in Freebase. It makes no sense to use this control parameter in
+  the envelope.
+
+*async*
+  When more than one MQL extension adapter needs to be run during the
+  ``pre`` or ``fetch`` phases, they are run in parallel unless ``async`` is
+  set to ``false``.
+
+*query*
+  Using control parameters in the right handside of a MQL extension
+  assumes that the adapter implements support for a {} style argument. This
+  is not necessarily the case and as it depends on the adapter's
+  implementation. For example, ``/people/person/age`` does not support being
+  given a {} query. To work around this limitation, this control parameter
+  was added as ``emql:query``. Its value represents what is to be sent to the
+  adapter.
+
+When using controls parameters in the right handside of a MQL extension -
+as opposed to in the envelope - they must be prefixed with ``emql:``.
+
+For example, the query below overrides the age adapter's URL to call an
+alternative version of the age adapter that returns 20 times the computed
+age of people:
+
+The ``emql:query`` under "age" represents the '"age": null' that would
+normally be used if control parameters were not used in that subquery::
+
+  [{
+     "type": "/people/person",
+     "name": null,
+     "age": {
+       "emql:query": null,
+       "emql:url": "http://emql.ovalmeta.user.dev.freebaseapps.com/age.dev",
+       "emql:cache": false
+     },
+     "age>=": 35,
+     "age<=": 45,
+     "limit": 10,
+     "sort": "age",
+     "return": "@min:age,@max:age,@median:age,result-count,value:fred"
+  }]
+
+Control parameters are not passed to adapters.
+
+
+.. _gallery: mqlread?help=gallery
+.. _query editor: http://www.freebase.com/app/queryeditor
+.. _Acre: http://www.freebase.com/apps
+.. _age: http://acre.freebase.com/#app=/user/ovalmeta/emql&file=age
+.. _chart: http://acre.freebase.com/#app=/user/ovalmeta/emql&file=chart
+.. _reStructuredText: http://docutils.sourceforge.net/docs/user/rst/quickref.html
+.. _docutils: http://docutils.sourceforge.net/
+.. _search: mqlread?help=/type/object/search
+.. _chapter 2: http://mql.freebaseapps.com/ch02.html#typedatetime
