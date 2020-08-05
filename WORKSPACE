@@ -5,6 +5,7 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 # Abseil-py
 http_archive(
     name = "absl_py",
+    sha256 = "fe3948746ca0543f01fb7767fb00bb739c7fe7e2514180c1575100b988b66542",
     strip_prefix = "abseil-py-master",
     urls = ["https://github.com/abseil/abseil-py/archive/master.zip"],
 )
